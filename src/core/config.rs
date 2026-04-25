@@ -30,6 +30,11 @@ pub fn parse_config(vars: &HashMap<String, String>) -> Result<NodeConfig, Config
         .cloned()
         .unwrap_or_else(|| http_addr.clone());
 
+    let storage_path = vars.get("STORAGE_PATH")
+        .filter(|v| !v.is_empty())
+        .cloned()
+        .unwrap_or_else(|| format!("/data/node-{}", node_id));
+
     let peers = parse_peers(vars.get("PEER_ADDRS").map(|s| s.as_str()).unwrap_or(""))?;
 
     let heartbeat_interval_ms = get_or_default(vars, "HEARTBEAT_INTERVAL_MS", 500)?;
@@ -47,6 +52,7 @@ pub fn parse_config(vars: &HashMap<String, String>) -> Result<NodeConfig, Config
         node_id,
         http_addr,
         advertise_addr,
+        storage_path,
         peers,
         heartbeat_interval_ms,
         election_timeout_min_ms,

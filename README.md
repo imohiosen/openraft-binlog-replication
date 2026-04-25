@@ -20,15 +20,16 @@ src/
     │   ├── raft.rs              # /raft/vote, /raft/append, /raft/snapshot
     │   └── management.rs        # /cluster/init, /add-learner, /change-membership
     └── store/
-        ├── log_store.rs         # RaftLogStorage (in-memory)
-        └── state_machine.rs     # RaftStateMachine (append-only Vec<String>)
+        ├── log_store.rs         # RaftLogStorage (sled-backed, durable)
+        └── state_machine.rs     # RaftStateMachine (sled-backed, durable)
 ```
 
 **Key choices:**
 - `openraft 0.9.24` with `storage-v2` feature
+- `sled 0.34` embedded database for durable log + state machine storage
 - `actix-web 4` for HTTP, `reqwest` for inter-node RPCs
 - `dotenvy` for env-based config (no CLI flags)
-- In-memory storage (demo scope)
+- Storage path configurable via `STORAGE_PATH` env var
 
 ## Quick Start
 
@@ -178,6 +179,7 @@ All config via environment variables (`.env` or Docker Compose `environment:`):
 | `NODE_ID` | required | Unique node ID (1, 2, 3, …) |
 | `HTTP_ADDR` | required | Bind address (`0.0.0.0:8080`) |
 | `ADVERTISE_ADDR` | same as `HTTP_ADDR` | Address peers use to reach this node |
+| `STORAGE_PATH` | `/data/node-{NODE_ID}` | Sled database directory for durable log + state |
 | `PEER_ADDRS` | `""` | Comma-separated peers: `2=node2:8080,3=node3:8080` |
 | `HEARTBEAT_INTERVAL_MS` | `500` | Leader heartbeat interval |
 | `ELECTION_TIMEOUT_MIN_MS` | `1500` | Min election timeout |
@@ -211,8 +213,25 @@ All config via environment variables (`.env` or Docker Compose `environment:`):
 | `POST` | `/raft/append` | AppendEntries RPC |
 | `POST` | `/raft/snapshot` | InstallSnapshot RPC |
 
+## Storage
+
+Each node persists its Raft log and state machine to [sled](https://github.com/spacejam/sled) on disk at `STORAGE_PATH`. Two sled databases are created per node:
+
+- `{STORAGE_PATH}/raft-log/` — Raft log entries + vote + last purged index
+- `{STORAGE_PATH}/state-machine/` — Applied entries + membership + snapshots
+
+Data survives container restarts. To wipe all state:
+
+```bash
+docker compose down -v
+```
+
 ## Cleanup
 
 ```bash
+# Stop containers (data preserved in volumes)
 docker compose down
+
+# Stop and delete all data
+docker compose down -v
 ```

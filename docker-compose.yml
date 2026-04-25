@@ -6,9 +6,12 @@ services:
       HTTP_ADDR: "0.0.0.0:8080"
       ADVERTISE_ADDR: "node1:8080"
       PEER_ADDRS: "2=node2:8080,3=node3:8080"
+      STORAGE_PATH: "/data"
       RUST_LOG: "info"
     ports:
       - "18080:8080"
+    volumes:
+      - node1-data:/data
     networks:
       - raft
 
@@ -19,9 +22,12 @@ services:
       HTTP_ADDR: "0.0.0.0:8080"
       ADVERTISE_ADDR: "node2:8080"
       PEER_ADDRS: "1=node1:8080,3=node3:8080"
+      STORAGE_PATH: "/data"
       RUST_LOG: "info"
     ports:
       - "28080:8080"
+    volumes:
+      - node2-data:/data
     networks:
       - raft
 
@@ -32,11 +38,19 @@ services:
       HTTP_ADDR: "0.0.0.0:8080"
       ADVERTISE_ADDR: "node3:8080"
       PEER_ADDRS: "1=node1:8080,2=node2:8080"
+      STORAGE_PATH: "/data"
       RUST_LOG: "info"
     ports:
       - "38080:8080"
+    volumes:
+      - node3-data:/data
     networks:
       - raft
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
 
 networks:
   raft:

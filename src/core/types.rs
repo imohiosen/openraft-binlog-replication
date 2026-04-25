@@ -6,6 +6,7 @@ pub struct NodeConfig {
     pub node_id: u64,
     pub http_addr: String,
     pub advertise_addr: String,
+    pub storage_path: String,
     pub peers: Vec<PeerAddr>,
     pub heartbeat_interval_ms: u64,
     pub election_timeout_min_ms: u64,

@@ -36,10 +36,12 @@ pub async fn append_entry(
 /// Read the current committed log from this node's state machine.
 #[get("/api/log")]
 pub async fn read_log(app: Data<App>) -> actix_web::Result<impl Responder> {
-    let state = app.state_machine.state.read().await;
-    Ok(Json(LogResponse {
-        entries: state.entries.clone(),
-    }))
+    let entries = app
+        .state_machine
+        .read_entries()
+        .await
+        .map_err(|e| actix_web::error::ErrorInternalServerError(format!("{}", e)))?;
+    Ok(Json(LogResponse { entries }))
 }
 
 /// Report the current leader (useful for demo/debugging).

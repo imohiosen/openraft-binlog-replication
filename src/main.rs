@@ -47,8 +47,12 @@ async fn main() -> std::io::Result<()> {
     };
     let raft_config = Arc::new(raft_config.validate().unwrap());
 
-    let log_store = LogStore::default();
-    let state_machine = StateMachineStore::default();
+    let storage_path = &node_config.storage_path;
+    tracing::info!(path = %storage_path, "Opening sled storage");
+    std::fs::create_dir_all(storage_path).expect("create storage directory");
+
+    let log_store = LogStore::new(storage_path).expect("open log store");
+    let state_machine = StateMachineStore::new(storage_path).expect("open state machine store");
     let network = Network::default();
 
     let raft = openraft::Raft::new(
