@@ -4,12 +4,14 @@ services:
     environment:
       NODE_ID: "1"
       HTTP_ADDR: "0.0.0.0:8080"
-      ADVERTISE_ADDR: "node1:8080"
-      PEER_ADDRS: "2=node2:8080,3=node3:8080"
+      GRPC_ADDR: "0.0.0.0:9090"
+      ADVERTISE_ADDR: "node1:9090"
+      PEER_ADDRS: "2=node2:9090,3=node3:9090"
       STORAGE_PATH: "/data"
       RUST_LOG: "info"
     ports:
       - "18080:8080"
+      - "19090:9090"
     volumes:
       - node1-data:/data
     networks:
@@ -20,12 +22,14 @@ services:
     environment:
       NODE_ID: "2"
       HTTP_ADDR: "0.0.0.0:8080"
-      ADVERTISE_ADDR: "node2:8080"
-      PEER_ADDRS: "1=node1:8080,3=node3:8080"
+      GRPC_ADDR: "0.0.0.0:9090"
+      ADVERTISE_ADDR: "node2:9090"
+      PEER_ADDRS: "1=node1:9090,3=node3:9090"
       STORAGE_PATH: "/data"
       RUST_LOG: "info"
     ports:
       - "28080:8080"
+      - "29090:9090"
     volumes:
       - node2-data:/data
     networks:
@@ -36,12 +40,14 @@ services:
     environment:
       NODE_ID: "3"
       HTTP_ADDR: "0.0.0.0:8080"
-      ADVERTISE_ADDR: "node3:8080"
-      PEER_ADDRS: "1=node1:8080,2=node2:8080"
+      GRPC_ADDR: "0.0.0.0:9090"
+      ADVERTISE_ADDR: "node3:9090"
+      PEER_ADDRS: "1=node1:9090,2=node2:9090"
       STORAGE_PATH: "/data"
       RUST_LOG: "info"
     ports:
       - "38080:8080"
+      - "39090:9090"
     volumes:
       - node3-data:/data
     networks:

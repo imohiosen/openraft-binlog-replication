@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package raft;
+
+service RaftService {
+  rpc Vote(RaftRequest) returns (RaftReply);
+  rpc AppendEntries(RaftRequest) returns (RaftReply);
+  rpc InstallSnapshot(RaftRequest) returns (RaftReply);
+}
+
+// Generic JSON-envelope: openraft types are complex, so we serialize them
+// to JSON inside a single bytes field. This avoids duplicating every
+// openraft struct in protobuf while still using gRPC for transport.
+message RaftRequest {
+  bytes data = 1;
+}
+
+message RaftReply {
+  bytes data = 1;
+  string error = 2;
+}

@@ -12,7 +12,9 @@ openraft = { version = "0.9.24", features = ["serde", "storage-v2"] }
 
 actix-web = "4"
 actix-rt = "2"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+tonic = "0.12"
+prost = "0.13"
 
 sled = "0.34"
 anyerror = "0.1"
@@ -26,3 +28,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 dotenvy = "0.15"
 maplit = "1"
+
+[build-dependencies]
+tonic-build = "0.12"

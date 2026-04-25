@@ -7,6 +7,7 @@ use tracing_subscriber::EnvFilter;
 
 use openraft_binlog_replication::core::config::parse_config;
 use openraft_binlog_replication::shell::app::App;
+use openraft_binlog_replication::shell::grpc;
 use openraft_binlog_replication::shell::network::Network;
 use openraft_binlog_replication::shell::server;
 use openraft_binlog_replication::shell::store::log_store::LogStore;
@@ -33,12 +34,13 @@ async fn main() -> std::io::Result<()> {
 
     tracing::info!(
         node_id = node_config.node_id,
-        addr = %node_config.http_addr,
+        http = %node_config.http_addr,
+        grpc = %node_config.grpc_addr,
         peers = ?node_config.peers,
         "Starting binlog replication node"
     );
 
-    // ── Imperative shell: construct Raft + server ──
+    // ── Imperative shell: construct Raft + servers ──
     let raft_config = Config {
         heartbeat_interval: node_config.heartbeat_interval_ms,
         election_timeout_min: node_config.election_timeout_min_ms,
@@ -53,7 +55,7 @@ async fn main() -> std::io::Result<()> {
 
     let log_store = LogStore::new(storage_path).expect("open log store");
     let state_machine = StateMachineStore::new(storage_path).expect("open state machine store");
-    let network = Network::default();
+    let network = Network;
 
     let raft = openraft::Raft::new(
         node_config.node_id,
@@ -65,15 +67,30 @@ async fn main() -> std::io::Result<()> {
     .await
     .unwrap();
 
+    let raft_arc = Arc::new(raft);
+
     let app = Data::new(App {
         id: node_config.node_id,
         addr: node_config.http_addr.clone(),
         advertise_addr: node_config.advertise_addr.clone(),
-        raft,
+        raft: Arc::clone(&raft_arc),
         state_machine,
         config: raft_config,
     });
 
+    // ── Start gRPC server for Raft RPCs (on a tokio task) ──
+    let grpc_addr: std::net::SocketAddr = node_config.grpc_addr.parse().expect("parse GRPC_ADDR");
+    let grpc_svc = grpc::make_server(raft_arc);
+    tokio::spawn(async move {
+        tracing::info!(%grpc_addr, "gRPC server starting");
+        tonic::transport::Server::builder()
+            .add_service(grpc_svc)
+            .serve(grpc_addr)
+            .await
+            .expect("gRPC server failed");
+    });
+
+    // ── Start HTTP server for client API + management (on actix-web runtime) ──
     tracing::info!(addr = %node_config.http_addr, "HTTP server starting");
     server::run(app, &node_config.http_addr).await
 }

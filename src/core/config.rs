@@ -25,10 +25,11 @@ pub fn parse_config(vars: &HashMap<String, String>) -> Result<NodeConfig, Config
         .map_err(|e| ConfigError::Invalid("NODE_ID".into(), e.to_string()))?;
 
     let http_addr = get_required(vars, "HTTP_ADDR")?;
-    let advertise_addr = vars.get("ADVERTISE_ADDR")
+    let grpc_addr = vars.get("GRPC_ADDR")
         .filter(|v| !v.is_empty())
         .cloned()
-        .unwrap_or_else(|| http_addr.clone());
+        .unwrap_or_else(|| "0.0.0.0:9090".to_string());
+    let advertise_addr = get_required(vars, "ADVERTISE_ADDR")?;
 
     let storage_path = vars.get("STORAGE_PATH")
         .filter(|v| !v.is_empty())
@@ -51,6 +52,7 @@ pub fn parse_config(vars: &HashMap<String, String>) -> Result<NodeConfig, Config
     Ok(NodeConfig {
         node_id,
         http_addr,
+        grpc_addr,
         advertise_addr,
         storage_path,
         peers,

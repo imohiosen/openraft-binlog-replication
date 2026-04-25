@@ -3,7 +3,7 @@ use actix_web::web::Data;
 use actix_web::{middleware, HttpServer};
 
 use crate::shell::app::App;
-use crate::shell::handlers::{api, management, raft};
+use crate::shell::handlers::{api, management};
 
 pub async fn run(app: Data<App>, bind_addr: &str) -> std::io::Result<()> {
     let server = HttpServer::new(move || {
@@ -11,16 +11,12 @@ pub async fn run(app: Data<App>, bind_addr: &str) -> std::io::Result<()> {
             .wrap(Logger::default())
             .wrap(middleware::Compress::default())
             .app_data(app.clone())
-            // Raft internal RPCs
-            .service(raft::vote)
-            .service(raft::append)
-            .service(raft::snapshot)
-            // Cluster management
+            // Cluster management (HTTP)
             .service(management::init)
             .service(management::add_learner)
             .service(management::change_membership)
             .service(management::metrics)
-            // Application API
+            // Application API (HTTP)
             .service(api::append_entry)
             .service(api::read_log)
             .service(api::leader)

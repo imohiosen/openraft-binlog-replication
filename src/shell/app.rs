@@ -9,7 +9,7 @@ pub struct App {
     pub id: NodeId,
     pub addr: String,
     pub advertise_addr: String,
-    pub raft: BinlogRaft,
+    pub raft: Arc<BinlogRaft>,
     pub state_machine: StateMachineStore,
     pub config: Arc<Config>,
 }

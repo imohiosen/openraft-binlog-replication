@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub struct NodeConfig {
     pub node_id: u64,
     pub http_addr: String,
+    pub grpc_addr: String,
     pub advertise_addr: String,
     pub storage_path: String,
     pub peers: Vec<PeerAddr>,
