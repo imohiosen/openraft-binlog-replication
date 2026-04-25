@@ -110,7 +110,7 @@ mod tests {
 
     #[test]
     fn test_parse_minimal_config() {
-        let vars = make_vars(&[("NODE_ID", "1"), ("HTTP_ADDR", "0.0.0.0:8080")]);
+        let vars = make_vars(&[("NODE_ID", "1"), ("HTTP_ADDR", "0.0.0.0:8080"), ("ADVERTISE_ADDR", "node1:9090")]);
         let cfg = parse_config(&vars).unwrap();
         assert_eq!(cfg.node_id, 1);
         assert_eq!(cfg.http_addr, "0.0.0.0:8080");
@@ -123,6 +123,7 @@ mod tests {
         let vars = make_vars(&[
             ("NODE_ID", "1"),
             ("HTTP_ADDR", "0.0.0.0:8080"),
+            ("ADVERTISE_ADDR", "node1:9090"),
             ("PEER_ADDRS", "2=node2:8080,3=node3:8080"),
         ]);
         let cfg = parse_config(&vars).unwrap();
@@ -142,6 +143,7 @@ mod tests {
         let vars = make_vars(&[
             ("NODE_ID", "1"),
             ("HTTP_ADDR", "0.0.0.0:8080"),
+            ("ADVERTISE_ADDR", "node1:9090"),
             ("ELECTION_TIMEOUT_MIN_MS", "3000"),
             ("ELECTION_TIMEOUT_MAX_MS", "1500"),
         ]);
