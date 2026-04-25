@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::core::sql::types::{SqlCommand, SqlResult};
+
 /// Parsed and validated node configuration — pure data, no IO.
 #[derive(Debug, Clone)]
 pub struct NodeConfig {
@@ -24,19 +26,21 @@ pub struct PeerAddr {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AppRequest {
     Append { message: String },
+    Sql(SqlCommand),
 }
 
 impl std::fmt::Display for AppRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AppRequest::Append { message } => write!(f, "Append({})", message),
+            AppRequest::Sql(cmd) => write!(f, "Sql({})", cmd),
         }
     }
 }
 
 /// Application response returned after a log entry is applied.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AppResponse {
-    pub index: u64,
-    pub message: String,
+pub enum AppResponse {
+    Append { index: u64, message: String },
+    Sql { index: u64, result: SqlResult },
 }

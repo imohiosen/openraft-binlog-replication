@@ -11,6 +11,7 @@ use openraft::storage::{RaftSnapshotBuilder, RaftStateMachine, Snapshot};
 use openraft::{BasicNode, Entry, EntryPayload, LogId, OptionalSend, SnapshotMeta, StorageError, StorageIOError, StoredMembership};
 use tokio::sync::RwLock;
 
+use crate::core::sql::types::{SelectPlan, SqlResult, SqlState};
 use crate::core::state_machine::BinlogState;
 use crate::core::types::AppResponse;
 use crate::TypeConfig;
@@ -70,10 +71,18 @@ impl StateMachineStore {
             }
         }
 
+        // Recover SQL state
+        let sql_state_tree = db.open_tree("sql_state")?;
+        let sql: SqlState = sql_state_tree
+            .get("current")?
+            .and_then(|v| serde_json::from_slice(&v).ok())
+            .unwrap_or_default();
+
         Ok(BinlogState {
             last_applied_log,
             last_membership,
             entries,
+            sql,
         })
     }
 
@@ -141,12 +150,33 @@ impl StateMachineStore {
         Ok(())
     }
 
+    fn sql_state_tree(&self) -> sled::Tree {
+        self.db
+            .open_tree("sql_state")
+            .expect("open sql_state tree")
+    }
+
+    /// Persist the entire SqlState as JSON to sled.
+    fn persist_sql_state(&self, sql: &SqlState) -> Result<(), StorageError<NID>> {
+        let data = serde_json::to_vec(sql).map_err(|e| io_err(&e))?;
+        self.sql_state_tree()
+            .insert("current", data)
+            .map_err(|e| io_err(&e))?;
+        Ok(())
+    }
+
     // ── Public read API (delegates to core) ──────────────────────────
 
     /// Read all committed entries.
     pub async fn read_entries(&self) -> Result<Vec<String>, StorageError<NID>> {
         let state = self.state.read().await;
         Ok(state.entries().to_vec())
+    }
+
+    /// Execute a SELECT query against the SQL state machine (read-only).
+    pub async fn query_select(&self, plan: &SelectPlan) -> Result<SqlResult, String> {
+        let state = self.state.read().await;
+        state.sql.query_select(plan).map_err(|e| e.to_string())
     }
 }
 
@@ -206,10 +236,15 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
             let response = match entry.payload {
                 EntryPayload::Blank => BinlogState::apply_blank(entry.log_id.index),
                 EntryPayload::Normal(req) => {
+                    let is_sql = matches!(req, crate::core::types::AppRequest::Sql(_));
                     let entry_index = state.entries.len() as u64;
                     let resp = state.apply_request(entry.log_id.index, req);
-                    // ── Shell: persist the new entry to sled ──
-                    self.persist_entry(entry_index, &resp.message)?;
+                    // ── Shell: persist to sled ──
+                    if is_sql {
+                        self.persist_sql_state(&state.sql)?;
+                    } else if let AppResponse::Append { ref message, .. } = resp {
+                        self.persist_entry(entry_index, message)?;
+                    }
                     resp
                 }
                 EntryPayload::Membership(mem) => {
@@ -253,6 +288,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
 
         // ── Shell: rebuild sled from restored core state ──
         self.rebuild_entries_from_state(&new_state)?;
+        self.persist_sql_state(&new_state.sql)?;
 
         let meta_tree = self.meta_tree();
         let applied = serde_json::to_vec(&meta.last_log_id).map_err(|e| io_err(&e))?;

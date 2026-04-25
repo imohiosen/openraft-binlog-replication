@@ -20,6 +20,7 @@ pub async fn run(app: Data<App>, bind_addr: &str) -> std::io::Result<()> {
             .service(api::append_entry)
             .service(api::read_log)
             .service(api::leader)
+            .service(api::execute_sql)
     });
 
     server.bind(bind_addr)?.run().await

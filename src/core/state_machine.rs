@@ -6,6 +6,7 @@
 use openraft::{BasicNode, LogId, StoredMembership};
 use serde::{Deserialize, Serialize};
 
+use crate::core::sql::types::{SqlCommand, SqlResult, SqlState};
 use crate::core::types::{AppRequest, AppResponse};
 
 /// Pure, serializable state of the binlog state machine.
@@ -15,6 +16,8 @@ pub struct BinlogState {
     pub last_applied_log: Option<LogId<u64>>,
     pub last_membership: StoredMembership<u64, BasicNode>,
     pub entries: Vec<String>,
+    #[serde(default)]
+    pub sql: SqlState,
 }
 
 impl Default for BinlogState {
@@ -23,6 +26,7 @@ impl Default for BinlogState {
             last_applied_log: None,
             last_membership: StoredMembership::default(),
             entries: Vec::new(),
+            sql: SqlState::default(),
         }
     }
 }
@@ -39,17 +43,30 @@ impl BinlogState {
         match req {
             AppRequest::Append { message } => {
                 self.entries.push(message.clone());
-                AppResponse {
+                AppResponse::Append {
                     index: log_index,
                     message,
                 }
             }
+            AppRequest::Sql(cmd) => self.apply_sql(log_index, cmd),
+        }
+    }
+
+    /// Apply a SQL command through the state machine.
+    pub fn apply_sql(&mut self, log_index: u64, cmd: SqlCommand) -> AppResponse {
+        let result = match self.sql.execute(cmd) {
+            Ok(r) => r,
+            Err(e) => SqlResult::Error(e.to_string()),
+        };
+        AppResponse::Sql {
+            index: log_index,
+            result,
         }
     }
 
     /// Record a blank entry (leader commit marker, no-op).
     pub fn apply_blank(log_index: u64) -> AppResponse {
-        AppResponse {
+        AppResponse::Append {
             index: log_index,
             message: String::new(),
         }
@@ -62,7 +79,7 @@ impl BinlogState {
         membership: StoredMembership<u64, BasicNode>,
     ) -> AppResponse {
         self.last_membership = membership;
-        AppResponse {
+        AppResponse::Append {
             index: log_id.index,
             message: String::new(),
         }
@@ -124,8 +141,13 @@ mod tests {
                 message: "hello".into(),
             },
         );
-        assert_eq!(resp.index, 1);
-        assert_eq!(resp.message, "hello");
+        match resp {
+            AppResponse::Append { index, message } => {
+                assert_eq!(index, 1);
+                assert_eq!(message, "hello");
+            }
+            _ => panic!("expected Append response"),
+        }
         assert_eq!(state.entries(), &["hello"]);
     }
 
@@ -141,8 +163,13 @@ mod tests {
     #[test]
     fn test_blank_response() {
         let resp = BinlogState::apply_blank(42);
-        assert_eq!(resp.index, 42);
-        assert!(resp.message.is_empty());
+        match resp {
+            AppResponse::Append { index, message } => {
+                assert_eq!(index, 42);
+                assert!(message.is_empty());
+            }
+            _ => panic!("expected Append response"),
+        }
     }
 
     #[test]
