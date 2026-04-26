@@ -45,6 +45,14 @@ async fn main() -> std::io::Result<()> {
         heartbeat_interval: node_config.heartbeat_interval_ms,
         election_timeout_min: node_config.election_timeout_min_ms,
         election_timeout_max: node_config.election_timeout_max_ms,
+        snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(
+            node_config.snapshot_logs_since_last,
+        ),
+        max_in_snapshot_log_to_keep: node_config.max_in_snapshot_log_to_keep,
+        purge_batch_size: node_config.purge_batch_size,
+        snapshot_max_chunk_size: node_config.snapshot_max_chunk_size,
+        max_payload_entries: node_config.max_payload_entries,
+        replication_lag_threshold: node_config.replication_lag_threshold,
         ..Default::default()
     };
     let raft_config = Arc::new(raft_config.validate().unwrap());
@@ -53,8 +61,18 @@ async fn main() -> std::io::Result<()> {
     tracing::info!(path = %storage_path, "Opening sled storage");
     std::fs::create_dir_all(storage_path).expect("create storage directory");
 
-    let log_store = LogStore::new(storage_path).expect("open log store");
-    let state_machine = StateMachineStore::new(storage_path).expect("open state machine store");
+    let log_store = LogStore::new(storage_path, node_config.log_compression)
+        .expect("open log store");
+    tracing::info!(log_compression = %node_config.log_compression, "Log entry compression");
+    let state_machine = StateMachineStore::new(storage_path, node_config.snapshot_compression)
+        .expect("open state machine store");
+    tracing::info!(
+        snapshot_compression = %node_config.snapshot_compression,
+        snapshot_policy_logs = node_config.snapshot_logs_since_last,
+        max_in_snapshot_log_to_keep = node_config.max_in_snapshot_log_to_keep,
+        purge_batch_size = node_config.purge_batch_size,
+        "Snapshot and log compaction config"
+    );
     let network = Network;
 
     let raft = openraft::Raft::new(

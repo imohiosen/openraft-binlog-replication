@@ -109,6 +109,39 @@ impl BinlogState {
         serde_json::from_slice(data)
     }
 
+    /// Magic header for LZ4-compressed snapshots ("SLZ4").
+    pub const LZ4_MAGIC: &'static [u8; 4] = b"SLZ4";
+
+    /// Serialize with optional LZ4 compression.
+    /// Compressed format: [SLZ4][4-byte LE uncompressed len][lz4 data]
+    pub fn to_snapshot_bytes_compressed(
+        &self,
+        compression: crate::core::types::SnapshotCompression,
+    ) -> Result<Vec<u8>, String> {
+        let json = serde_json::to_vec(self).map_err(|e| e.to_string())?;
+        match compression {
+            crate::core::types::SnapshotCompression::None => Ok(json),
+            crate::core::types::SnapshotCompression::Lz4 => {
+                let compressed = lz4_flex::compress_prepend_size(&json);
+                let mut out = Vec::with_capacity(4 + compressed.len());
+                out.extend_from_slice(Self::LZ4_MAGIC);
+                out.extend_from_slice(&compressed);
+                Ok(out)
+            }
+        }
+    }
+
+    /// Deserialize, auto-detecting LZ4 compression from magic header.
+    pub fn from_snapshot_bytes_auto(data: &[u8]) -> Result<Self, String> {
+        if data.len() >= 4 && &data[..4] == Self::LZ4_MAGIC {
+            let decompressed = lz4_flex::decompress_size_prepended(&data[4..])
+                .map_err(|e| format!("lz4 decompress error: {}", e))?;
+            serde_json::from_slice(&decompressed).map_err(|e| e.to_string())
+        } else {
+            serde_json::from_slice(data).map_err(|e| e.to_string())
+        }
+    }
+
     /// Deterministic snapshot ID derived from last-applied log position.
     pub fn snapshot_id(&self) -> String {
         format!(

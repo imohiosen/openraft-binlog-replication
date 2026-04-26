@@ -2,6 +2,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::sql::types::{SqlCommand, SqlResult};
 
+/// Snapshot compression algorithm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotCompression {
+    None,
+    Lz4,
+}
+
+impl std::fmt::Display for SnapshotCompression {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => write!(f, "none"),
+            Self::Lz4 => write!(f, "lz4"),
+        }
+    }
+}
+
 /// Parsed and validated node configuration — pure data, no IO.
 #[derive(Debug, Clone)]
 pub struct NodeConfig {
@@ -14,6 +30,14 @@ pub struct NodeConfig {
     pub heartbeat_interval_ms: u64,
     pub election_timeout_min_ms: u64,
     pub election_timeout_max_ms: u64,
+    pub snapshot_compression: SnapshotCompression,
+    pub snapshot_logs_since_last: u64,
+    pub max_in_snapshot_log_to_keep: u64,
+    pub purge_batch_size: u64,
+    pub snapshot_max_chunk_size: u64,
+    pub max_payload_entries: u64,
+    pub replication_lag_threshold: u64,
+    pub log_compression: SnapshotCompression,
 }
 
 #[derive(Debug, Clone)]

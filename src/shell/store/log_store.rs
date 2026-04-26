@@ -7,9 +7,13 @@ use openraft::storage::{LogFlushed, LogState, RaftLogReader, RaftLogStorage};
 use openraft::{Entry, LogId, OptionalSend, StorageError, StorageIOError, Vote};
 use tokio::sync::RwLock;
 
+use crate::core::types::SnapshotCompression;
 use crate::TypeConfig;
 
 type NID = u64;
+
+/// Magic header for LZ4-compressed log entries.
+const LOG_LZ4_MAGIC: &[u8; 4] = b"RL4E";
 
 fn io_err(e: impl std::fmt::Display) -> StorageError<NID> {
     StorageError::IO {
@@ -21,18 +25,44 @@ fn io_err(e: impl std::fmt::Display) -> StorageError<NID> {
     }
 }
 
+/// Compress a log entry's JSON bytes with LZ4 if configured.
+fn compress_entry(json: &[u8], compression: SnapshotCompression) -> Vec<u8> {
+    match compression {
+        SnapshotCompression::None => json.to_vec(),
+        SnapshotCompression::Lz4 => {
+            let compressed = lz4_flex::compress_prepend_size(json);
+            let mut out = Vec::with_capacity(4 + compressed.len());
+            out.extend_from_slice(LOG_LZ4_MAGIC);
+            out.extend_from_slice(&compressed);
+            out
+        }
+    }
+}
+
+/// Decompress a log entry, auto-detecting LZ4 from magic header.
+fn decompress_entry(data: &[u8]) -> Result<Vec<u8>, String> {
+    if data.len() >= 4 && &data[..4] == LOG_LZ4_MAGIC {
+        lz4_flex::decompress_size_prepended(&data[4..])
+            .map_err(|e| format!("lz4 decompress error: {}", e))
+    } else {
+        Ok(data.to_vec())
+    }
+}
+
 /// Sled-backed Raft log store. Three sled trees:
-/// - `log`   : index (u64 BE bytes) → Entry<TypeConfig> (JSON)
+/// - `log`   : index (u64 BE bytes) → Entry<TypeConfig> (JSON, optionally LZ4-compressed)
 /// - `meta`  : "vote" → Vote (JSON), "last_purged" → LogId (JSON)
 #[derive(Debug, Clone)]
 pub struct LogStore {
     db: Arc<sled::Db>,
     /// Cache of last_purged to avoid constant deserialization.
     last_purged: Arc<RwLock<Option<LogId<NID>>>>,
+    /// Compression for log entries.
+    compression: SnapshotCompression,
 }
 
 impl LogStore {
-    pub fn new(path: impl AsRef<Path>) -> Result<Self, sled::Error> {
+    pub fn new(path: impl AsRef<Path>, compression: SnapshotCompression) -> Result<Self, sled::Error> {
         let db = sled::open(path.as_ref().join("raft-log"))?;
         // Recover last_purged from meta tree
         let meta = db.open_tree("meta")?;
@@ -45,6 +75,7 @@ impl LogStore {
         Ok(Self {
             db: Arc::new(db),
             last_purged: Arc::new(RwLock::new(last_purged)),
+            compression,
         })
     }
 
@@ -82,7 +113,8 @@ impl RaftLogReader<TypeConfig> for LogStore {
         let iter = log.range((std::ops::Bound::Included(start), end));
         for item in iter {
             let (_, val) = item.map_err(|e| io_err(&e))?;
-            let entry: Entry<TypeConfig> = serde_json::from_slice(&val).map_err(|e| io_err(&e))?;
+            let decompressed = decompress_entry(&val).map_err(|e| io_err(&e))?;
+            let entry: Entry<TypeConfig> = serde_json::from_slice(&decompressed).map_err(|e| io_err(&e))?;
             entries.push(entry);
         }
         Ok(entries)
@@ -97,9 +129,11 @@ impl RaftLogStorage<TypeConfig> for LogStore {
         let last_log_id = log
             .last()
             .map_err(|e| io_err(&e))?
-            .map(|(_, v)| serde_json::from_slice::<Entry<TypeConfig>>(&v))
-            .transpose()
-            .map_err(|e| io_err(&e))?
+            .map(|(_, v)| {
+                let decompressed = decompress_entry(&v).map_err(|e| io_err(e))?;
+                serde_json::from_slice::<Entry<TypeConfig>>(&decompressed).map_err(|e| io_err(&e))
+            })
+            .transpose()?
             .map(|e| e.log_id);
 
         let last_purged = *self.last_purged.read().await;
@@ -145,7 +179,8 @@ impl RaftLogStorage<TypeConfig> for LogStore {
         let mut batch = sled::Batch::default();
         for entry in entries {
             let key = Self::index_key(entry.log_id.index);
-            let val = serde_json::to_vec(&entry).map_err(|e| io_err(&e))?;
+            let json = serde_json::to_vec(&entry).map_err(|e| io_err(&e))?;
+            let val = compress_entry(&json, self.compression);
             batch.insert(&key, val);
         }
         log.apply_batch(batch).map_err(|e| io_err(&e))?;

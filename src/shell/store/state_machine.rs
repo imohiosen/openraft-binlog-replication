@@ -13,7 +13,7 @@ use tokio::sync::RwLock;
 
 use crate::core::sql::types::{CatalogQuery, SelectPlan, SqlResult, SqlState};
 use crate::core::state_machine::BinlogState;
-use crate::core::types::AppResponse;
+use crate::core::types::{AppResponse, SnapshotCompression};
 use crate::TypeConfig;
 
 type NID = u64;
@@ -37,15 +37,18 @@ pub struct StateMachineStore {
     db: Arc<sled::Db>,
     /// The canonical in-memory state — all reads and writes go through here.
     state: Arc<RwLock<BinlogState>>,
+    /// Snapshot compression algorithm.
+    compression: SnapshotCompression,
 }
 
 impl StateMachineStore {
-    pub fn new(path: impl AsRef<Path>) -> Result<Self, sled::Error> {
+    pub fn new(path: impl AsRef<Path>, compression: SnapshotCompression) -> Result<Self, sled::Error> {
         let db = sled::open(path.as_ref().join("state-machine"))?;
         let state = Self::recover_state(&db)?;
         Ok(Self {
             db: Arc::new(db),
             state: Arc::new(RwLock::new(state)),
+            compression,
         })
     }
 
@@ -192,12 +195,21 @@ impl RaftSnapshotBuilder<TypeConfig> for StateMachineStore {
     async fn build_snapshot(&mut self) -> Result<Snapshot<TypeConfig>, StorageError<NID>> {
         let state = self.state.read().await;
 
-        let data = state.to_snapshot_bytes().map_err(|e| io_err(&e))?;
+        let data = state
+            .to_snapshot_bytes_compressed(self.compression)
+            .map_err(|e| io_err(&e))?;
         let snapshot_id = state.snapshot_id();
         let last_membership = state.last_membership.clone();
         let last_applied = state.last_applied_log;
 
         drop(state); // release lock before sled write
+
+        tracing::info!(
+            compression = %self.compression,
+            size_bytes = data.len(),
+            snapshot_id = %snapshot_id,
+            "Built snapshot"
+        );
 
         self.snap_tree()
             .insert("current", data.clone())
@@ -288,9 +300,9 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
     ) -> Result<(), StorageError<NID>> {
         let data = snapshot.into_inner();
 
-        // ── Core: restore state from snapshot bytes ──
+        // ── Core: restore state from snapshot bytes (auto-detect compression) ──
         let new_state =
-            BinlogState::from_snapshot_bytes(&data).map_err(|e| io_err(&e))?;
+            BinlogState::from_snapshot_bytes_auto(&data).map_err(|e| io_err(&e))?;
 
         // ── Shell: rebuild sled from restored core state ──
         self.rebuild_entries_from_state(&new_state)?;
@@ -326,7 +338,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
             None => Ok(None),
             Some(data) => {
                 let restored =
-                    BinlogState::from_snapshot_bytes(&data).map_err(|e| io_err(&e))?;
+                    BinlogState::from_snapshot_bytes_auto(&data).map_err(|e| io_err(&e))?;
                 let snapshot_id = restored.snapshot_id();
                 Ok(Some(Snapshot {
                     meta: SnapshotMeta {

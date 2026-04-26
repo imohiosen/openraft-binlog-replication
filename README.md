@@ -324,6 +324,14 @@ All config via environment variables (`.env` or Docker Compose `environment:`):
 | `HEARTBEAT_INTERVAL_MS` | `500` | Leader heartbeat interval |
 | `ELECTION_TIMEOUT_MIN_MS` | `1500` | Min election timeout |
 | `ELECTION_TIMEOUT_MAX_MS` | `3000` | Max election timeout |
+| `SNAPSHOT_COMPRESSION` | `lz4` | Snapshot compression: `lz4` or `none` |
+| `LOG_COMPRESSION` | `lz4` | Raft log entry compression: `lz4` or `none` |
+| `SNAPSHOT_LOGS_SINCE_LAST` | `5000` | Trigger automatic snapshot after N log entries since last snapshot |
+| `MAX_IN_SNAPSHOT_LOG_TO_KEEP` | `500` | Max old log entries to retain after snapshot |
+| `PURGE_BATCH_SIZE` | `256` | Batch size for log purging |
+| `SNAPSHOT_MAX_CHUNK_SIZE` | `4194304` | Max snapshot chunk size for transfer (bytes, default 4 MiB) |
+| `MAX_PAYLOAD_ENTRIES` | `300` | Max log entries per replication payload |
+| `REPLICATION_LAG_THRESHOLD` | `10000` | Switch from log to snapshot replication when follower is this far behind |
 | `RUST_LOG` | `info` | Log level |
 
 ## API Reference
@@ -383,6 +391,10 @@ Each node persists to [sled](https://github.com/spacejam/sled) on disk at `STORA
 | `{STORAGE_PATH}/state-machine/` | Binlog entries, membership, snapshots, SQL state |
 
 The SQL state (schemas, tables, indexes, sequences) is persisted as a single JSON blob in the `sql_state` sled tree, updated after every write operation. Snapshots include the full SQL state for consistency during node recovery.
+
+**Compression:** Both snapshots and Raft log entries are LZ4-compressed by default using `lz4_flex` (pure Rust). Each uses a magic-header format (`SLZ4` for snapshots, `RL4E` for log entries) so the reader auto-detects compression — nodes with different compression settings can interoperate. Set `SNAPSHOT_COMPRESSION=none` and/or `LOG_COMPRESSION=none` to disable.
+
+**Automatic snapshotting & log compaction:** OpenRaft triggers a snapshot after `SNAPSHOT_LOGS_SINCE_LAST` entries (default 5000). After a snapshot is taken, old log entries are purged in batches of `PURGE_BATCH_SIZE` (default 256), keeping at most `MAX_IN_SNAPSHOT_LOG_TO_KEEP` (default 500) entries that are already in the snapshot. Followers that fall behind by `REPLICATION_LAG_THRESHOLD` (default 10000) entries receive the snapshot instead of individual log entries.
 
 Data survives container restarts. To wipe all state:
 

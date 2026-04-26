@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::core::types::{NodeConfig, PeerAddr};
+use crate::core::types::{NodeConfig, PeerAddr, SnapshotCompression};
 
 #[derive(Debug)]
 pub enum ConfigError {
@@ -49,6 +49,16 @@ pub fn parse_config(vars: &HashMap<String, String>) -> Result<NodeConfig, Config
         ));
     }
 
+    let snapshot_compression = parse_compression(vars, "SNAPSHOT_COMPRESSION", SnapshotCompression::Lz4)?;
+    let log_compression = parse_compression(vars, "LOG_COMPRESSION", SnapshotCompression::Lz4)?;
+
+    let snapshot_logs_since_last = get_or_default(vars, "SNAPSHOT_LOGS_SINCE_LAST", 5000)?;
+    let max_in_snapshot_log_to_keep = get_or_default(vars, "MAX_IN_SNAPSHOT_LOG_TO_KEEP", 500)?;
+    let purge_batch_size = get_or_default(vars, "PURGE_BATCH_SIZE", 256)?;
+    let snapshot_max_chunk_size = get_or_default(vars, "SNAPSHOT_MAX_CHUNK_SIZE", 4_194_304)?; // 4 MiB
+    let max_payload_entries = get_or_default(vars, "MAX_PAYLOAD_ENTRIES", 300)?;
+    let replication_lag_threshold = get_or_default(vars, "REPLICATION_LAG_THRESHOLD", 10000)?;
+
     Ok(NodeConfig {
         node_id,
         http_addr,
@@ -59,7 +69,31 @@ pub fn parse_config(vars: &HashMap<String, String>) -> Result<NodeConfig, Config
         heartbeat_interval_ms,
         election_timeout_min_ms,
         election_timeout_max_ms,
+        snapshot_compression,
+        snapshot_logs_since_last,
+        max_in_snapshot_log_to_keep,
+        purge_batch_size,
+        snapshot_max_chunk_size,
+        max_payload_entries,
+        replication_lag_threshold,
+        log_compression,
     })
+}
+
+fn parse_compression(
+    vars: &HashMap<String, String>,
+    key: &str,
+    default: SnapshotCompression,
+) -> Result<SnapshotCompression, ConfigError> {
+    match vars.get(key).map(|s| s.as_str()) {
+        Some("none") | Some("off") | Some("false") => Ok(SnapshotCompression::None),
+        Some("lz4") => Ok(SnapshotCompression::Lz4),
+        None => Ok(default),
+        Some(other) => Err(ConfigError::Invalid(
+            key.into(),
+            format!("expected 'none' or 'lz4', got '{}'", other),
+        )),
+    }
 }
 
 fn get_required(vars: &HashMap<String, String>, key: &str) -> Result<String, ConfigError> {
