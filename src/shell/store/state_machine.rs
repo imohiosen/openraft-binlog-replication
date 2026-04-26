@@ -11,7 +11,7 @@ use openraft::storage::{RaftSnapshotBuilder, RaftStateMachine, Snapshot};
 use openraft::{BasicNode, Entry, EntryPayload, LogId, OptionalSend, SnapshotMeta, StorageError, StorageIOError, StoredMembership};
 use tokio::sync::RwLock;
 
-use crate::core::sql::types::{SelectPlan, SqlResult, SqlState};
+use crate::core::sql::types::{CatalogQuery, SelectPlan, SqlResult, SqlState};
 use crate::core::state_machine::BinlogState;
 use crate::core::types::AppResponse;
 use crate::TypeConfig;
@@ -177,6 +177,12 @@ impl StateMachineStore {
     pub async fn query_select(&self, plan: &SelectPlan) -> Result<SqlResult, String> {
         let state = self.state.read().await;
         state.sql.query_select(plan).map_err(|e| e.to_string())
+    }
+
+    /// Execute a catalog query (SHOW TABLES, DESCRIBE, etc.) against the SQL state machine.
+    pub async fn query_catalog(&self, query: &CatalogQuery) -> Result<SqlResult, String> {
+        let state = self.state.read().await;
+        state.sql.catalog_query(query).map_err(|e| e.to_string())
     }
 }
 

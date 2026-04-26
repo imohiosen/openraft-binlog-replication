@@ -1,42 +1,139 @@
 # OpenRaft Binlog Replication
 
-A 3-node replicated append-only log (binlog) built with [OpenRaft](https://github.com/databendlabs/openraft) in Rust, demonstrating active-passive failover via Docker Compose.
+A 3-node replicated log with a **SQL query engine** built on [OpenRaft](https://github.com/databendlabs/openraft) in Rust. Supports CREATE TABLE, INSERT, SELECT (with JOINs, aggregates, GROUP BY), UPDATE, DELETE, TRUNCATE — all replicated through Raft consensus and persisted to sled. Demonstrated via Docker Compose with active-passive failover.
 
 ## Architecture
 
-**Functional Core / Imperative Shell** — pure logic separated from IO.
+```
+┌─────────────────────────────────────────────────────────┐
+│                     Client (curl)                       │
+│         POST /api/sql  {"sql": "SELECT ..."}            │
+└────────────────────────┬────────────────────────────────┘
+                         │ HTTP :8080
+┌────────────────────────▼────────────────────────────────┐
+│                   Leader Node                           │
+│  ┌──────────┐   ┌───────────┐   ┌───────────────────┐  │
+│  │ sqlparser │──▶│ SqlCommand │──▶│ raft.client_write │  │
+│  │ (parse)   │   │ (AST)     │   │ (replicate)       │  │
+│  └──────────┘   └───────────┘   └─────────┬─────────┘  │
+│                                            │            │
+│  SELECT path:                     gRPC :9090│ (Vote,    │
+│  raft.ensure_linearizable()                 │ Append,   │
+│  → query local sled state                   │ Snapshot) │
+└─────────────────────────────────────────────┼───────────┘
+                         ┌────────────────────┼──────┐
+                         ▼                    ▼      ▼
+                   ┌──────────┐        ┌──────────┐ ┌──────────┐
+                   │ Follower │        │ Follower │ │   sled   │
+                   │  Node 2  │        │  Node 3  │ │ (durable │
+                   │  :8080   │        │  :8080   │ │ storage) │
+                   │  :9090   │        │  :9090   │ └──────────┘
+                   └──────────┘        └──────────┘
+```
+
+**Data flow for writes:** Client → HTTP `POST /api/sql` → leader parses SQL with `sqlparser-rs` into a deterministic `SqlCommand` AST → replicated through Raft to all nodes via gRPC → each node applies the AST to its local sled-backed state machine.
+
+**Data flow for reads:** Client → HTTP `POST /api/sql` with `SELECT` → leader calls `raft.ensure_linearizable()` to confirm it still holds leadership → queries the local in-memory SQL state → returns rows. Linearizable reads are leader-only by design.
+
+### Functional Core / Imperative Shell
+
+Pure logic separated from IO. The core is synchronous, zero-dependency, and unit-testable. The shell owns all side effects.
 
 ```
 src/
-├── core/                        # Pure, no IO, no async
-│   ├── types.rs                 # AppRequest, AppResponse, NodeConfig
-│   └── config.rs                # parse_config(HashMap) → Result<NodeConfig>
-└── shell/                       # All side effects
-    ├── app.rs                   # App state (Raft instance + stores)
-    ├── server.rs                # actix-web route wiring
-    ├── network.rs               # RaftNetworkFactory (reqwest HTTP)
+├── lib.rs                           # declare_raft_types! TypeConfig
+├── main.rs                          # Startup: gRPC server (tokio) + HTTP server (actix thread)
+│
+├── core/                            # Pure — no IO, no async, no side effects
+│   ├── types.rs                     # AppRequest (Append | Sql), AppResponse, NodeConfig
+│   ├── config.rs                    # parse_config(HashMap) → Result<NodeConfig>
+│   ├── state_machine.rs             # BinlogState: pure apply logic + snapshot ser/de
+│   └── sql/
+│       ├── types.rs                 # Value, Column, TableSchema, Row, SqlCommand, Expr, SelectPlan
+│       ├── expr.rs                  # eval(): 3-valued NULL logic, numeric promotion, aggregates
+│       ├── engine.rs                # SqlState.execute(): CREATE/DROP/INSERT/UPDATE/DELETE/TRUNCATE
+│       ├── exec.rs                  # SqlState.query_select(): FROM→JOIN→WHERE→GROUP→HAVING→ORDER→LIMIT
+│       └── error.rs                 # SqlError enum
+│
+└── shell/                           # All side effects: HTTP, gRPC, sled, async
+    ├── app.rs                       # App { raft, state_machine, config }
+    ├── server.rs                    # actix-web route registration
+    ├── grpc.rs                      # tonic RaftService (Vote, AppendEntries, InstallSnapshot)
+    ├── network.rs                   # RaftNetworkFactory → tonic gRPC client
+    ├── sql/
+    │   └── parser.rs                # sqlparser AST → SqlCommand / SelectPlan translation
     ├── handlers/
-    │   ├── api.rs               # POST /api/append, GET /api/log, GET /api/leader
-    │   ├── raft.rs              # /raft/vote, /raft/append, /raft/snapshot
-    │   └── management.rs        # /cluster/init, /add-learner, /change-membership
+    │   ├── api.rs                   # POST /api/sql, POST /api/append, GET /api/log, GET /api/leader
+    │   └── management.rs            # /cluster/init, /add-learner, /change-membership, /metrics
     └── store/
-        ├── log_store.rs         # RaftLogStorage (sled-backed, durable)
-        └── state_machine.rs     # RaftStateMachine (sled-backed, durable)
+        ├── log_store.rs             # RaftLogStorage (sled: raft-log/)
+        └── state_machine.rs         # RaftStateMachine (sled: state-machine/ + sql_state)
 ```
 
-**Key choices:**
-- `openraft 0.9.24` with `storage-v2` feature
-- `sled 0.34` embedded database for durable log + state machine storage
-- `actix-web 4` for HTTP, `reqwest` for inter-node RPCs
-- `dotenvy` for env-based config (no CLI flags)
-- Storage path configurable via `STORAGE_PATH` env var
+### Key Technology Choices
+
+| Layer | Technology | Purpose |
+|-------|-----------|---------|
+| Consensus | `openraft 0.9.24` (storage-v2) | Raft leader election, log replication, snapshots |
+| Inter-node RPC | `tonic 0.12` / `prost 0.13` (gRPC) | Vote, AppendEntries, InstallSnapshot — JSON-in-protobuf envelope |
+| Client API | `actix-web 4` (HTTP) | SQL endpoint, cluster management, binlog append |
+| SQL parsing | `sqlparser 0.53` | Raw SQL text → deterministic AST (parsed on leader, AST replicated) |
+| Storage | `sled 0.34` | Durable Raft log, state machine, SQL tables/indexes/schemas |
+| Config | `dotenvy 0.15` | All config via environment variables, no CLI flags |
+
+### SQL Engine Design
+
+The SQL engine is **replicated at the AST level** — the leader parses SQL text into a `SqlCommand` enum using `sqlparser-rs`, then replicates that deterministic command through Raft. Followers never parse SQL; they only apply the pre-parsed AST. This eliminates parser-version skew across nodes.
+
+**State model:** All SQL state (schemas, tables, indexes, sequences) lives in a single `SqlState` struct that is serialized to sled as JSON. This struct is also included in Raft snapshots for consistency during node recovery.
+
+**Supported SQL:**
+
+| Category | Statements |
+|----------|-----------|
+| DDL | `CREATE TABLE`, `DROP TABLE`, `CREATE INDEX`, `DROP INDEX` |
+| DML | `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE` |
+| Query | `SELECT` with `WHERE`, `ORDER BY`, `LIMIT`, `OFFSET`, `GROUP BY`, `HAVING` |
+| Joins | `INNER JOIN` (nested-loop) |
+| Aggregates | `COUNT`, `SUM`, `AVG`, `MIN`, `MAX` |
+| Types | `INT`, `BIGINT`, `TEXT`, `BOOL`, `REAL` |
+| Constraints | `PRIMARY KEY` (uniqueness enforced), `NOT NULL` |
+
+**Limitations:**
+- No transactions (each statement = one Raft entry)
+- No `LEFT`/`RIGHT`/`OUTER` joins — only `INNER JOIN`
+- Index push-down for equality on a single indexed column only; otherwise full scan
+- Linearizable reads are leader-only (`ensure_linearizable()`)
+- No prepared statements or parameterized queries
 
 ## Quick Start
 
 ```bash
 docker compose build
 docker compose up -d
-./demo.sh
+
+# Initialize cluster
+curl -X POST http://localhost:18080/cluster/init
+curl -X POST http://localhost:18080/cluster/add-learner \
+  -H 'Content-Type: application/json' -d '{"node_id":2,"addr":"node2:9090"}'
+curl -X POST http://localhost:18080/cluster/add-learner \
+  -H 'Content-Type: application/json' -d '{"node_id":3,"addr":"node3:9090"}'
+curl -X POST http://localhost:18080/cluster/change-membership \
+  -H 'Content-Type: application/json' -d '[1,2,3]'
+
+# Create a table and insert data
+curl -X POST http://localhost:18080/api/sql \
+  -H 'Content-Type: application/json' \
+  -d '{"sql": "CREATE TABLE users (id INT PRIMARY KEY, name TEXT NOT NULL, age INT)"}'
+
+curl -X POST http://localhost:18080/api/sql \
+  -H 'Content-Type: application/json' \
+  -d '{"sql": "INSERT INTO users VALUES (1, '\''alice'\'', 30), (2, '\''bob'\'', 25)"}'
+
+curl -X POST http://localhost:18080/api/sql \
+  -H 'Content-Type: application/json' \
+  -d '{"sql": "SELECT * FROM users"}'
+# → {"results":[{"columns":["id","name","age"],"rows":[[1,"alice",30],[2,"bob",25]]}]}
 ```
 
 ## Manual Walkthrough
@@ -47,7 +144,7 @@ docker compose up -d
 docker compose up -d
 ```
 
-Three nodes start on ports `18080`, `28080`, `38080`.
+Three nodes start — HTTP on ports `18080`, `28080`, `38080`; gRPC on `19090`, `29090`, `39090`.
 
 ### 2. Initialize and form the cluster
 
@@ -55,14 +152,14 @@ Three nodes start on ports `18080`, `28080`, `38080`.
 # Initialize node1 as a single-node cluster
 curl -X POST http://localhost:18080/cluster/init
 
-# Add node2 and node3 as learners
+# Add node2 and node3 as learners (gRPC addresses)
 curl -X POST http://localhost:18080/cluster/add-learner \
   -H 'Content-Type: application/json' \
-  -d '{"node_id":2,"addr":"node2:8080"}'
+  -d '{"node_id":2,"addr":"node2:9090"}'
 
 curl -X POST http://localhost:18080/cluster/add-learner \
   -H 'Content-Type: application/json' \
-  -d '{"node_id":3,"addr":"node3:8080"}'
+  -d '{"node_id":3,"addr":"node3:9090"}'
 
 # Promote all to voters
 curl -X POST http://localhost:18080/cluster/change-membership \
@@ -70,105 +167,138 @@ curl -X POST http://localhost:18080/cluster/change-membership \
   -d '[1,2,3]'
 ```
 
-### 3. Write entries
+### 3. SQL operations
+
+```bash
+# Create a table
+curl -X POST http://localhost:18080/api/sql \
+  -H 'Content-Type: application/json' \
+  -d '{"sql": "CREATE TABLE users (id INT PRIMARY KEY, name TEXT NOT NULL, age INT)"}'
+
+# Create an index
+curl -X POST http://localhost:18080/api/sql \
+  -H 'Content-Type: application/json' \
+  -d '{"sql": "CREATE INDEX idx_users_age ON users(age)"}'
+
+# Insert rows
+curl -X POST http://localhost:18080/api/sql \
+  -H 'Content-Type: application/json' \
+  -d '{"sql": "INSERT INTO users VALUES (1, '\''alice'\'', 30), (2, '\''bob'\'', 25), (3, '\''carol'\'', 35)"}'
+
+# Query with WHERE, ORDER BY, LIMIT
+curl -X POST http://localhost:18080/api/sql \
+  -H 'Content-Type: application/json' \
+  -d '{"sql": "SELECT name, age FROM users WHERE age > 25 ORDER BY age DESC LIMIT 2"}'
+# → {"results":[{"columns":["name","age"],"rows":[["carol",35],["alice",30]]}]}
+
+# Aggregates
+curl -X POST http://localhost:18080/api/sql \
+  -H 'Content-Type: application/json' \
+  -d '{"sql": "SELECT COUNT(*), AVG(age) FROM users"}'
+# → {"results":[{"columns":["COUNT(*)","AVG(age)"],"rows":[[3,30.0]]}]}
+
+# JOIN
+curl -X POST http://localhost:18080/api/sql \
+  -H 'Content-Type: application/json' \
+  -d '{"sql": "SELECT u.name, o.total FROM users u JOIN orders o ON o.user_id = u.id"}'
+
+# UPDATE
+curl -X POST http://localhost:18080/api/sql \
+  -H 'Content-Type: application/json' \
+  -d '{"sql": "UPDATE users SET age = age + 1 WHERE id = 1"}'
+
+# DELETE
+curl -X POST http://localhost:18080/api/sql \
+  -H 'Content-Type: application/json' \
+  -d '{"sql": "DELETE FROM users WHERE id = 3"}'
+
+# GROUP BY
+curl -X POST http://localhost:18080/api/sql \
+  -H 'Content-Type: application/json' \
+  -d '{"sql": "SELECT age, COUNT(*) FROM users GROUP BY age"}'
+
+# TRUNCATE
+curl -X POST http://localhost:18080/api/sql \
+  -H 'Content-Type: application/json' \
+  -d '{"sql": "TRUNCATE TABLE users"}'
+```
+
+### 4. Legacy binlog append (still supported)
 
 ```bash
 curl -X POST http://localhost:18080/api/append \
   -H 'Content-Type: application/json' \
   -d '{"message":"event-1"}'
-```
 
-### 4. Read from any node
-
-```bash
-# Leader
 curl http://localhost:18080/api/log
-
-# Followers
-curl http://localhost:28080/api/log
-curl http://localhost:38080/api/log
 ```
 
 ### 5. Trigger failover
 
 ```bash
 # Kill the leader
-docker compose stop node1
+docker compose kill node1
 
-# Check who became leader
+# Check who became leader (wait ~5s for election)
 curl http://localhost:28080/api/leader
 curl http://localhost:38080/api/leader
 
-# Write to the new leader
-curl -X POST http://localhost:28080/api/append \
+# Write SQL to the new leader
+curl -X POST http://localhost:38080/api/sql \
   -H 'Content-Type: application/json' \
-  -d '{"message":"event-after-failover"}'
+  -d '{"sql": "INSERT INTO users VALUES (4, '\''dave'\'', 28)"}'
 ```
 
 ### 6. Rejoin the old leader
 
 ```bash
 docker compose start node1
+sleep 5
 
-# Verify it caught up
-curl http://localhost:18080/api/log
+# Verify it caught up — all SQL state replicated
+curl -X POST http://localhost:18080/api/sql \
+  -H 'Content-Type: application/json' \
+  -d '{"sql": "SELECT * FROM users"}'
 ```
 
 ## Validated Test Results
 
 Full end-to-end test run on April 25, 2026:
 
+### SQL E2E Tests (all on leader)
+
+| # | SQL | Result |
+|---|-----|--------|
+| 1 | `CREATE TABLE users (id INT PRIMARY KEY, name TEXT NOT NULL, age INT)` | `{"status":"created"}` |
+| 2 | `CREATE INDEX idx_users_age ON users(age)` | `{"status":"created"}` |
+| 3 | `INSERT INTO users VALUES (1,'alice',30), (2,'bob',25), (3,'carol',35)` | `{"rows_affected":3}` |
+| 4 | `SELECT * FROM users` | 3 rows: alice/30, bob/25, carol/35 |
+| 5 | `SELECT name, age ... WHERE age > 25 ORDER BY age DESC LIMIT 2` | carol/35, eve/32 |
+| 6 | `SELECT COUNT(*), AVG(age) FROM users` | 5, 30.0 |
+| 7 | `UPDATE users SET age = age + 1 WHERE id = 1` | `{"rows_affected":1}` — alice now 31 |
+| 8 | `DELETE FROM users WHERE id = 5` | `{"rows_affected":1}` |
+| 9 | `SELECT age, COUNT(*) FROM users GROUP BY age` | 4 distinct groups |
+| 10 | `CREATE TABLE orders` + `INSERT` + `INNER JOIN` | alice/99.99, alice/25.0, bob/49.5 |
+| 11 | `TRUNCATE TABLE users` | `{"status":"truncated"}`, then `SELECT *` returns empty |
+
+### Durability Test
+
 | Step | Action | Result |
 |------|--------|--------|
-| 1 | Init cluster on node1 | Node1 became **Leader** (term 1) |
-| 2–3 | Add node2 & node3 as learners, promote to voters | Membership: `[1, 2, 3]` |
-| 4 | Write `event-1` through `event-5` to leader | All 5 entries committed (log indices 6–10) |
-| 5–7 | Read log from all 3 nodes | All show identical `["event-1", "event-2", "event-3", "event-4", "event-5"]` |
-| 8 | **Kill leader (node1)** | Container stopped |
-| 9 | Check new leader | **Node2 elected leader** (term 2), node3 is Follower |
-| 10 | Write `event-6` through `event-8` to new leader (node2) | All 3 committed (log indices 12–14) |
-| 11–12 | Read log from surviving nodes | Both show all 8 entries |
-| 13 | **Restart node1** | Container restarted |
-| 14 | Read log from rejoined node1 | Shows **all 8 entries** — caught up automatically. Node1 now Follower under node2 |
+| 1 | Insert users + orders, create index | All committed |
+| 2 | `docker compose restart` (all 3 nodes) | All restarted |
+| 3 | `SELECT * FROM users` after restart | All 3 rows intact |
+| 4 | `SELECT * FROM orders` after restart | All 3 rows intact |
+| 5 | `JOIN` query after restart | Identical results — schemas, indexes, sequences all survived |
 
-### Raw output (condensed)
+### Failover Test
 
-```
-=== Init ===
-{"Ok":null}                                          # node1 initialized
-{"leader_id":1,"current_node":1,"state":"Leader"}    # node1 is leader
-
-=== Add learners + promote ===
-membership: {"configs":[[1,2,3]], "nodes":{...}}     # 3-node quorum
-
-=== Write 5 entries ===
-{"Ok":{"log_id":{"leader_id":{"term":1,"node_id":1},"index":6}, "data":{"message":"event-1"}}}
-{"Ok":{"log_id":{"leader_id":{"term":1,"node_id":1},"index":7}, "data":{"message":"event-2"}}}
-...
-{"Ok":{"log_id":{"leader_id":{"term":1,"node_id":1},"index":10},"data":{"message":"event-5"}}}
-
-=== Read from all nodes ===
-node1: {"entries":["event-1","event-2","event-3","event-4","event-5"]}
-node2: {"entries":["event-1","event-2","event-3","event-4","event-5"]}
-node3: {"entries":["event-1","event-2","event-3","event-4","event-5"]}
-
-=== Kill node1, check new leader ===
-node2: {"leader_id":2,"current_node":2,"state":"Leader"}
-node3: {"leader_id":2,"current_node":3,"state":"Follower"}
-
-=== Write to new leader (node2) ===
-{"Ok":{"log_id":{"leader_id":{"term":2,"node_id":2},"index":12},"data":{"message":"event-6"}}}
-{"Ok":{"log_id":{"leader_id":{"term":2,"node_id":2},"index":13},"data":{"message":"event-7"}}}
-{"Ok":{"log_id":{"leader_id":{"term":2,"node_id":2},"index":14},"data":{"message":"event-8"}}}
-
-=== Read from surviving nodes ===
-node2: {"entries":["event-1","event-2","event-3","event-4","event-5","event-6","event-7","event-8"]}
-node3: {"entries":["event-1","event-2","event-3","event-4","event-5","event-6","event-7","event-8"]}
-
-=== Restart node1, verify catch-up ===
-node1: {"entries":["event-1","event-2","event-3","event-4","event-5","event-6","event-7","event-8"]}
-node1: {"leader_id":2,"current_node":1,"state":"Follower"}
-```
+| Step | Action | Result |
+|------|--------|--------|
+| 1 | `docker compose kill node1` (leader) | Container killed |
+| 2 | Check leaders after ~5s | **Node3 elected leader** (term 2), node2 is Follower |
+| 3 | `INSERT INTO users VALUES (4,'dave',28)` on node3 | `{"rows_affected":1}` |
+| 4 | `SELECT * FROM users` on node3 | 4 rows — all original data + dave |
 
 ## Configuration
 
@@ -177,10 +307,11 @@ All config via environment variables (`.env` or Docker Compose `environment:`):
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `NODE_ID` | required | Unique node ID (1, 2, 3, …) |
-| `HTTP_ADDR` | required | Bind address (`0.0.0.0:8080`) |
-| `ADVERTISE_ADDR` | same as `HTTP_ADDR` | Address peers use to reach this node |
+| `HTTP_ADDR` | required | HTTP bind address for client API (`0.0.0.0:8080`) |
+| `GRPC_ADDR` | `0.0.0.0:9090` | gRPC bind address for Raft inter-node RPCs |
+| `ADVERTISE_ADDR` | same as `GRPC_ADDR` | gRPC address peers use to reach this node |
 | `STORAGE_PATH` | `/data/node-{NODE_ID}` | Sled database directory for durable log + state |
-| `PEER_ADDRS` | `""` | Comma-separated peers: `2=node2:8080,3=node3:8080` |
+| `PEER_ADDRS` | `""` | Comma-separated peers: `2=node2:9090,3=node3:9090` |
 | `HEARTBEAT_INTERVAL_MS` | `500` | Leader heartbeat interval |
 | `ELECTION_TIMEOUT_MIN_MS` | `1500` | Min election timeout |
 | `ELECTION_TIMEOUT_MAX_MS` | `3000` | Max election timeout |
@@ -188,37 +319,61 @@ All config via environment variables (`.env` or Docker Compose `environment:`):
 
 ## API Reference
 
-### Application
+### SQL (primary API)
+
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `POST` | `/api/sql` | `{"sql": "<statement>"}` | Execute one or more SQL statements. Writes go through Raft; `SELECT` uses linearizable reads (leader-only). |
+
+**Response format:**
+```json
+{
+  "results": [
+    {"columns": ["id","name","age"], "rows": [[1,"alice",30]]},
+    {"rows_affected": 3},
+    {"status": "created"},
+    {"error": "table 'x' not found"}
+  ]
+}
+```
+
+### Legacy Binlog (backward-compatible)
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/append` | Append `{"message":"..."}` to the replicated log |
-| `GET` | `/api/log` | Read all committed entries from this node |
+| `POST` | `/api/append` | Append `{"message":"..."}` to the replicated binlog |
+| `GET` | `/api/log` | Read all committed binlog entries from this node |
 | `GET` | `/api/leader` | Current leader ID, node ID, and Raft state |
 
-### Cluster Management
+### Cluster Management (HTTP)
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/cluster/init` | Initialize single-node cluster |
-| `POST` | `/cluster/add-learner` | Add `{"node_id":N,"addr":"host:port"}` as learner |
+| `POST` | `/cluster/add-learner` | Add `{"node_id":N,"addr":"host:9090"}` as learner (gRPC address) |
 | `POST` | `/cluster/change-membership` | Promote learners: `[1,2,3]` |
 | `GET` | `/cluster/metrics` | Full Raft metrics (term, leader, log state) |
 
-### Raft Internal (node-to-node)
+### Raft Internal (gRPC, node-to-node, port 9090)
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/raft/vote` | RequestVote RPC |
-| `POST` | `/raft/append` | AppendEntries RPC |
-| `POST` | `/raft/snapshot` | InstallSnapshot RPC |
+| Service | RPC | Description |
+|---------|-----|-------------|
+| `RaftService` | `Vote` | RequestVote — leader election |
+| `RaftService` | `AppendEntries` | Log replication |
+| `RaftService` | `InstallSnapshot` | Snapshot transfer to lagging nodes |
+
+Uses a JSON-in-protobuf envelope: `message RaftRequest { bytes data; }` carries serde_json-encoded openraft types inside a protobuf wrapper to avoid hand-translating every openraft type into proto messages.
 
 ## Storage
 
-Each node persists its Raft log and state machine to [sled](https://github.com/spacejam/sled) on disk at `STORAGE_PATH`. Two sled databases are created per node:
+Each node persists to [sled](https://github.com/spacejam/sled) on disk at `STORAGE_PATH`:
 
-- `{STORAGE_PATH}/raft-log/` — Raft log entries + vote + last purged index
-- `{STORAGE_PATH}/state-machine/` — Applied entries + membership + snapshots
+| Sled Database | Contents |
+|--------------|----------|
+| `{STORAGE_PATH}/raft-log/` | Raft log entries, vote, last purged index |
+| `{STORAGE_PATH}/state-machine/` | Binlog entries, membership, snapshots, SQL state |
+
+The SQL state (schemas, tables, indexes, sequences) is persisted as a single JSON blob in the `sql_state` sled tree, updated after every write operation. Snapshots include the full SQL state for consistency during node recovery.
 
 Data survives container restarts. To wipe all state:
 

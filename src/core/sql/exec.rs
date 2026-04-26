@@ -62,6 +62,27 @@ impl SqlState {
     ) -> Result<(Vec<ColumnRef>, Vec<Row>), SqlError> {
         match from {
             FromClause::Table { name, alias } => {
+                // Intercept information_schema.* virtual tables
+                let lower = name.to_ascii_lowercase();
+                if lower.starts_with("information_schema.") {
+                    let virtual_table = &lower["information_schema.".len()..];
+                    let (mut columns, rows) = match virtual_table {
+                        "tables" => self.information_schema_tables(),
+                        "columns" => self.information_schema_columns(),
+                        "statistics" => self.information_schema_statistics(),
+                        other => return Err(SqlError::TableNotFound(
+                            format!("information_schema.{}", other),
+                        )),
+                    };
+                    // Apply alias if provided
+                    if let Some(a) = alias {
+                        for col in &mut columns {
+                            col.table = Some(a.clone());
+                        }
+                    }
+                    return Ok((columns, rows));
+                }
+
                 let schema = self
                     .schemas
                     .get(name)

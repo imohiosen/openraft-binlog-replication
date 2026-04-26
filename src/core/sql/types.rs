@@ -311,6 +311,15 @@ impl std::fmt::Display for SqlCommand {
     }
 }
 
+// ── Catalog queries (read-only, not replicated) ──────────────────────
+
+#[derive(Debug, Clone)]
+pub enum CatalogQuery {
+    ShowTables,
+    ShowDatabases,
+    DescribeTable { name: String },
+}
+
 // ── SQL result (returned after apply or SELECT) ──────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

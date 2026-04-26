@@ -9,6 +9,7 @@ use crate::core::sql::types::*;
 pub enum ParsedStatement {
     Command(SqlCommand),
     Query(SelectPlan),
+    Catalog(CatalogQuery),
 }
 
 /// Parse one or more SQL statements.
@@ -222,6 +223,30 @@ fn translate_statement(stmt: Statement) -> Result<ParsedStatement, SqlError> {
         Statement::Query(query) => {
             let plan = translate_query(*query)?;
             Ok(ParsedStatement::Query(plan))
+        }
+
+        Statement::ShowTables { .. } => {
+            Ok(ParsedStatement::Catalog(CatalogQuery::ShowTables))
+        }
+
+        Statement::ShowDatabases { .. } => {
+            Ok(ParsedStatement::Catalog(CatalogQuery::ShowDatabases))
+        }
+
+        Statement::ShowColumns { show_options, .. } => {
+            let table_name = show_options
+                .show_in
+                .and_then(|si| si.parent_name)
+                .map(|n| object_name_to_string(&n))
+                .ok_or_else(|| SqlError::ParseError("SHOW COLUMNS requires FROM <table>".into()))?;
+            Ok(ParsedStatement::Catalog(CatalogQuery::DescribeTable {
+                name: table_name,
+            }))
+        }
+
+        Statement::ExplainTable { table_name, .. } => {
+            let name = object_name_to_string(&table_name);
+            Ok(ParsedStatement::Catalog(CatalogQuery::DescribeTable { name }))
         }
 
         _ => Err(SqlError::Unsupported(format!(

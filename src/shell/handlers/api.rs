@@ -127,6 +127,25 @@ pub async fn execute_sql(
                     Err(e) => results.push(SqlResultJson::Error { error: e }),
                 }
             }
+            ParsedStatement::Catalog(query) => {
+                // Catalog queries (SHOW/DESCRIBE) use linearizable reads.
+                if let Err(e) = app.raft.ensure_linearizable().await {
+                    let metrics = app.raft.metrics().borrow().clone();
+                    let leader_hint = metrics.current_leader;
+                    results.push(SqlResultJson::Error {
+                        error: format!(
+                            "not leader; forward catalog query to leader node {} (linearizable read requires leader)",
+                            leader_hint.map(|id| id.to_string()).unwrap_or("unknown".into())
+                        ),
+                    });
+                    continue;
+                }
+
+                match app.state_machine.query_catalog(&query).await {
+                    Ok(sql_result) => results.push(sql_result_to_json(sql_result)),
+                    Err(e) => results.push(SqlResultJson::Error { error: e }),
+                }
+            }
             ParsedStatement::Command(cmd) => {
                 let request = AppRequest::Sql(cmd);
                 match app.raft.client_write(request).await {
