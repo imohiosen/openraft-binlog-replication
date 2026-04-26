@@ -146,10 +146,28 @@ pub struct IndexDef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UniqueConstraintDef {
+    pub name: Option<String>,
+    pub columns: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ForeignKeyDef {
+    pub name: Option<String>,
+    pub columns: Vec<String>,
+    pub ref_table: String,
+    pub ref_columns: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TableSchema {
     pub name: String,
     pub columns: Vec<Column>,
     pub indexes: Vec<IndexDef>,
+    #[serde(default)]
+    pub unique_constraints: Vec<UniqueConstraintDef>,
+    #[serde(default)]
+    pub foreign_keys: Vec<ForeignKeyDef>,
 }
 
 impl TableSchema {

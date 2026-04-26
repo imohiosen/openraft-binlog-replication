@@ -16,6 +16,8 @@ pub enum SqlError {
     ParseError(String),
     EvalError(String),
     AmbiguousColumn(String),
+    ForeignKeyViolation { constraint: String, table: String, ref_table: String },
+    ForeignKeyReferencedViolation { constraint: String, table: String, ref_table: String },
     NoTable,
 }
 
@@ -54,6 +56,12 @@ impl fmt::Display for SqlError {
             Self::ParseError(msg) => write!(f, "parse error: {}", msg),
             Self::EvalError(msg) => write!(f, "evaluation error: {}", msg),
             Self::AmbiguousColumn(col) => write!(f, "ambiguous column reference: '{}'", col),
+            Self::ForeignKeyViolation { constraint, table, ref_table } => write!(
+                f, "foreign key violation: constraint '{}' on table '{}' references '{}'", constraint, table, ref_table
+            ),
+            Self::ForeignKeyReferencedViolation { constraint, table, ref_table } => write!(
+                f, "cannot delete/update: rows in '{}' are referenced by foreign key '{}' on '{}'", table, constraint, ref_table
+            ),
             Self::NoTable => write!(f, "no table specified"),
         }
     }

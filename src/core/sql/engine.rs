@@ -49,6 +49,23 @@ impl SqlState {
             }
             return Err(SqlError::TableAlreadyExists(name));
         }
+        // Validate foreign key references
+        for fk in &schema.foreign_keys {
+            let ref_schema = self.schemas.get(&fk.ref_table).ok_or_else(|| {
+                SqlError::TableNotFound(format!(
+                    "referenced table '{}' in foreign key", fk.ref_table
+                ))
+            })?;
+            for rc in &fk.ref_columns {
+                if ref_schema.column_index(rc).is_none() {
+                    return Err(SqlError::ColumnNotFound {
+                        table: fk.ref_table.clone(),
+                        column: rc.clone(),
+                    });
+                }
+            }
+        }
+
         self.schemas.insert(name.clone(), schema);
         self.tables.insert(name.clone(), BTreeMap::new());
         self.sequences.insert(name, 0);
@@ -64,6 +81,20 @@ impl SqlState {
             }
             return Err(SqlError::TableNotFound(name.to_string()));
         }
+        // Check no other table has a FK referencing this table
+        for (other_name, other_schema) in &self.schemas {
+            if other_name == name { continue; }
+            for fk in &other_schema.foreign_keys {
+                if fk.ref_table.eq_ignore_ascii_case(name) {
+                    return Err(SqlError::ForeignKeyReferencedViolation {
+                        constraint: fk.name.clone().unwrap_or_else(|| "unnamed".into()),
+                        table: name.to_string(),
+                        ref_table: other_name.clone(),
+                    });
+                }
+            }
+        }
+
         // Remove indexes
         if let Some(schema) = self.schemas.get(name) {
             let idx_names: Vec<String> = schema.indexes.iter().map(|i| i.name.clone()).collect();
@@ -227,6 +258,12 @@ impl SqlState {
                 }
             }
 
+            // Check unique constraints
+            self.check_unique_constraints(table_name, &full_row, &schema, None)?;
+
+            // Check foreign key constraints (values must exist in referenced table)
+            self.check_fk_values(table_name, &full_row, &schema)?;
+
             // Assign row_id
             let seq = self.sequences.get_mut(table_name).unwrap();
             let row_id = *seq;
@@ -306,6 +343,15 @@ impl SqlState {
                 new_row[col_idx] = new_val;
             }
 
+            // Check unique constraints on the new row
+            self.check_unique_constraints(table_name, &new_row, &schema, Some(row_id))?;
+
+            // Check FK constraints — new values must exist in referenced table
+            self.check_fk_values(table_name, &new_row, &schema)?;
+
+            // Check no other table's FK references the old values being changed
+            self.check_fk_referenced_by_others(table_name, &old_row, &schema)?;
+
             // Update indexes (remove old, insert new)
             self.update_indexes_delete(table_name, row_id, &old_row, &schema);
             self.update_indexes_insert(table_name, row_id, &new_row, &schema)?;
@@ -362,6 +408,11 @@ impl SqlState {
                 .collect()
         };
 
+        // Check FK references from other tables before deleting
+        for (_, row) in &to_delete {
+            self.check_fk_referenced_by_others(table_name, row, &schema)?;
+        }
+
         let deleted = to_delete.len() as u64;
         for (row_id, row) in &to_delete {
             self.update_indexes_delete(table_name, *row_id, row, &schema);
@@ -378,6 +429,24 @@ impl SqlState {
     fn truncate(&mut self, table_name: &str) -> Result<SqlResult, SqlError> {
         if !self.schemas.contains_key(table_name) {
             return Err(SqlError::TableNotFound(table_name.to_string()));
+        }
+
+        // Check if any other table has FK referencing this table with existing rows
+        for (other_name, other_schema) in &self.schemas {
+            if other_name == table_name { continue; }
+            for fk in &other_schema.foreign_keys {
+                if fk.ref_table.eq_ignore_ascii_case(table_name) {
+                    if let Some(other_data) = self.tables.get(other_name) {
+                        if !other_data.is_empty() {
+                            return Err(SqlError::ForeignKeyReferencedViolation {
+                                constraint: fk.name.clone().unwrap_or_else(|| "unnamed".into()),
+                                table: table_name.to_string(),
+                                ref_table: other_name.clone(),
+                            });
+                        }
+                    }
+                }
+            }
         }
 
         // Clear table data
@@ -456,6 +525,152 @@ impl SqlState {
                 }
             }
         }
+    }
+
+    // ── Unique constraint helpers ──────────────────────────────────
+
+    fn check_unique_constraints(
+        &self,
+        table_name: &str,
+        row: &Row,
+        schema: &TableSchema,
+        exclude_row_id: Option<u64>,
+    ) -> Result<(), SqlError> {
+        for uc in &schema.unique_constraints {
+            let col_indices: Vec<usize> = uc
+                .columns
+                .iter()
+                .filter_map(|c| schema.column_index(c))
+                .collect();
+            if col_indices.len() != uc.columns.len() { continue; }
+
+            // Skip if any column in the constraint is NULL (NULLs are distinct per SQL standard)
+            if col_indices.iter().any(|&i| row[i].is_null()) { continue; }
+
+            let new_vals: Vec<&Value> = col_indices.iter().map(|&i| &row[i]).collect();
+
+            if let Some(table_data) = self.tables.get(table_name) {
+                for (&rid, existing) in table_data {
+                    if exclude_row_id == Some(rid) { continue; }
+                    let existing_vals: Vec<&Value> = col_indices.iter().map(|&i| &existing[i]).collect();
+                    if new_vals == existing_vals {
+                        return Err(SqlError::UniqueViolation {
+                            index: uc.name.clone().unwrap_or_else(|| {
+                                format!("unique({})", uc.columns.join(","))
+                            }),
+                            value: format!("{:?}", new_vals.iter().map(|v| format!("{}", v)).collect::<Vec<_>>()),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // ── Foreign key helpers ──────────────────────────────────────────
+
+    /// Check that FK column values in `row` exist in the referenced table.
+    fn check_fk_values(
+        &self,
+        table_name: &str,
+        row: &Row,
+        schema: &TableSchema,
+    ) -> Result<(), SqlError> {
+        for fk in &schema.foreign_keys {
+            let col_indices: Vec<usize> = fk
+                .columns
+                .iter()
+                .filter_map(|c| schema.column_index(c))
+                .collect();
+            if col_indices.len() != fk.columns.len() { continue; }
+
+            // NULL FK values are allowed (no reference required)
+            if col_indices.iter().any(|&i| row[i].is_null()) { continue; }
+
+            let fk_vals: Vec<&Value> = col_indices.iter().map(|&i| &row[i]).collect();
+
+            let ref_schema = match self.schemas.get(&fk.ref_table) {
+                Some(s) => s,
+                None => continue,
+            };
+            let ref_col_indices: Vec<usize> = fk
+                .ref_columns
+                .iter()
+                .filter_map(|c| ref_schema.column_index(c))
+                .collect();
+            if ref_col_indices.len() != fk.ref_columns.len() { continue; }
+
+            let ref_data = match self.tables.get(&fk.ref_table) {
+                Some(d) => d,
+                None => continue,
+            };
+
+            let found = ref_data.values().any(|ref_row| {
+                let ref_vals: Vec<&Value> = ref_col_indices.iter().map(|&i| &ref_row[i]).collect();
+                ref_vals == fk_vals
+            });
+
+            if !found {
+                return Err(SqlError::ForeignKeyViolation {
+                    constraint: fk.name.clone().unwrap_or_else(|| {
+                        format!("fk({}.{} -> {}.{})",
+                            table_name, fk.columns.join(","),
+                            fk.ref_table, fk.ref_columns.join(","))
+                    }),
+                    table: table_name.to_string(),
+                    ref_table: fk.ref_table.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Check that no other table's FK references the values in `row` being deleted/updated.
+    fn check_fk_referenced_by_others(
+        &self,
+        table_name: &str,
+        row: &Row,
+        schema: &TableSchema,
+    ) -> Result<(), SqlError> {
+        // Collect this table's column values that might be referenced
+        for (other_name, other_schema) in &self.schemas {
+            if other_name == table_name { continue; }
+            for fk in &other_schema.foreign_keys {
+                if !fk.ref_table.eq_ignore_ascii_case(table_name) { continue; }
+
+                let ref_col_indices: Vec<usize> = fk
+                    .ref_columns
+                    .iter()
+                    .filter_map(|c| schema.column_index(c))
+                    .collect();
+                if ref_col_indices.len() != fk.ref_columns.len() { continue; }
+
+                let ref_vals: Vec<&Value> = ref_col_indices.iter().map(|&i| &row[i]).collect();
+                if ref_vals.iter().any(|v| v.is_null()) { continue; }
+
+                let fk_col_indices: Vec<usize> = fk
+                    .columns
+                    .iter()
+                    .filter_map(|c| other_schema.column_index(c))
+                    .collect();
+                if fk_col_indices.len() != fk.columns.len() { continue; }
+
+                if let Some(other_data) = self.tables.get(other_name) {
+                    let has_ref = other_data.values().any(|other_row| {
+                        let other_vals: Vec<&Value> = fk_col_indices.iter().map(|&i| &other_row[i]).collect();
+                        other_vals == ref_vals
+                    });
+                    if has_ref {
+                        return Err(SqlError::ForeignKeyReferencedViolation {
+                            constraint: fk.name.clone().unwrap_or_else(|| "unnamed".into()),
+                            table: table_name.to_string(),
+                            ref_table: other_name.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 

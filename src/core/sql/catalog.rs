@@ -40,8 +40,15 @@ impl SqlState {
             .map(|col| {
                 let key = if col.primary_key {
                     "PRI".to_string()
+                } else if schema.unique_constraints.iter().any(|uc| {
+                    uc.columns.iter().any(|c| c.eq_ignore_ascii_case(&col.name))
+                }) {
+                    "UNI".to_string()
+                } else if schema.foreign_keys.iter().any(|fk| {
+                    fk.columns.iter().any(|c| c.eq_ignore_ascii_case(&col.name))
+                }) {
+                    "MUL".to_string()
                 } else {
-                    // Check if this column is part of any index
                     let in_index = schema.indexes.iter().any(|idx| {
                         idx.columns.iter().any(|c| c.eq_ignore_ascii_case(&col.name))
                     });
@@ -127,6 +134,14 @@ impl SqlState {
             for (i, col) in schema.columns.iter().enumerate() {
                 let key = if col.primary_key {
                     "PRI"
+                } else if schema.unique_constraints.iter().any(|uc| {
+                    uc.columns.iter().any(|c| c.eq_ignore_ascii_case(&col.name))
+                }) {
+                    "UNI"
+                } else if schema.foreign_keys.iter().any(|fk| {
+                    fk.columns.iter().any(|c| c.eq_ignore_ascii_case(&col.name))
+                }) {
+                    "MUL"
                 } else if schema.indexes.iter().any(|idx| {
                     idx.columns.iter().any(|c| c.eq_ignore_ascii_case(&col.name))
                 }) {

@@ -49,10 +49,11 @@ src/
 │   ├── config.rs                    # parse_config(HashMap) → Result<NodeConfig>
 │   ├── state_machine.rs             # BinlogState: pure apply logic + snapshot ser/de
 │   └── sql/
-│       ├── types.rs                 # Value, Column, TableSchema, Row, SqlCommand, Expr, SelectPlan
+│       ├── types.rs                 # Value, Column, TableSchema, Row, SqlCommand, Expr, SelectPlan, ForeignKeyDef, UniqueConstraintDef
 │       ├── expr.rs                  # eval(): 3-valued NULL logic, numeric promotion, aggregates
-│       ├── engine.rs                # SqlState.execute(): CREATE/DROP/INSERT/UPDATE/DELETE/TRUNCATE
+│       ├── engine.rs                # SqlState.execute(): CREATE/DROP/INSERT/UPDATE/DELETE/TRUNCATE + FK/UK enforcement
 │       ├── exec.rs                  # SqlState.query_select(): FROM→JOIN→WHERE→GROUP→HAVING→ORDER→LIMIT
+│       ├── catalog.rs               # SHOW TABLES/DATABASES, DESCRIBE, INFORMATION_SCHEMA virtual tables
 │       └── error.rs                 # SqlError enum
 │
 └── shell/                           # All side effects: HTTP, gRPC, sled, async
@@ -97,11 +98,19 @@ The SQL engine is **replicated at the AST level** — the leader parses SQL text
 | Joins | `INNER JOIN` (nested-loop) |
 | Aggregates | `COUNT`, `SUM`, `AVG`, `MIN`, `MAX` |
 | Types | `INT`, `BIGINT`, `TEXT`, `BOOL`, `REAL` |
-| Constraints | `PRIMARY KEY` (uniqueness enforced), `NOT NULL` |
+| Constraints | `PRIMARY KEY`, `NOT NULL`, `UNIQUE`, `FOREIGN KEY … REFERENCES` |
+| Catalog | `SHOW TABLES`, `SHOW DATABASES`, `DESCRIBE`, `SHOW COLUMNS FROM`, `information_schema.*` |
+
+**Constraints detail:**
+- **`PRIMARY KEY`** — uniqueness enforced on insert; implicit `NOT NULL`
+- **`UNIQUE`** — column-level (`email TEXT UNIQUE`) or table-level (`UNIQUE(col1, col2)`); NULL values are distinct per SQL standard
+- **`FOREIGN KEY`** — column-level (`user_id INT REFERENCES users(id)`) or table-level (`CONSTRAINT fk_name FOREIGN KEY (col) REFERENCES parent(col)`); enforced on `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, and `DROP TABLE`; NULL FK values are permitted (no reference required)
+- **`NOT NULL`** — rejects NULL on insert/update
 
 **Limitations:**
 - No transactions (each statement = one Raft entry)
 - No `LEFT`/`RIGHT`/`OUTER` joins — only `INNER JOIN`
+- No `ON DELETE CASCADE` / `ON UPDATE CASCADE` — FK violations are errors (RESTRICT semantics)
 - Index push-down for equality on a single indexed column only; otherwise full scan
 - Linearizable reads are leader-only (`ensure_linearizable()`)
 - No prepared statements or parameterized queries

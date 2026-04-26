@@ -26,12 +26,32 @@ fn translate_statement(stmt: Statement) -> Result<ParsedStatement, SqlError> {
             let mut columns = Vec::new();
             let mut pk_columns: Vec<String> = Vec::new();
 
-            // Extract PRIMARY KEY from table constraints
+            let mut unique_constraints: Vec<UniqueConstraintDef> = Vec::new();
+            let mut foreign_keys: Vec<ForeignKeyDef> = Vec::new();
+
+            // Extract constraints from table-level constraints
             for constraint in &ct.constraints {
-                if let ast::TableConstraint::PrimaryKey { columns: cols, .. } = constraint {
-                    for col in cols {
-                        pk_columns.push(col.value.clone());
+                match constraint {
+                    ast::TableConstraint::PrimaryKey { columns: cols, .. } => {
+                        for col in cols {
+                            pk_columns.push(col.value.clone());
+                        }
                     }
+                    ast::TableConstraint::Unique { columns: cols, name, .. } => {
+                        unique_constraints.push(UniqueConstraintDef {
+                            name: name.as_ref().map(|n| n.value.clone()),
+                            columns: cols.iter().map(|c| c.value.clone()).collect(),
+                        });
+                    }
+                    ast::TableConstraint::ForeignKey { columns: cols, foreign_table, referred_columns, name, .. } => {
+                        foreign_keys.push(ForeignKeyDef {
+                            name: name.as_ref().map(|n| n.value.clone()),
+                            columns: cols.iter().map(|c| c.value.clone()).collect(),
+                            ref_table: object_name_to_string(foreign_table),
+                            ref_columns: referred_columns.iter().map(|c| c.value.clone()).collect(),
+                        });
+                    }
+                    _ => {}
                 }
             }
 
@@ -49,7 +69,21 @@ fn translate_statement(stmt: Statement) -> Result<ParsedStatement, SqlError> {
                             if *is_primary {
                                 is_pk = true;
                                 nullable = false;
+                            } else {
+                                // Column-level UNIQUE constraint
+                                unique_constraints.push(UniqueConstraintDef {
+                                    name: None,
+                                    columns: vec![col_name.clone()],
+                                });
                             }
+                        }
+                        ast::ColumnOption::ForeignKey { foreign_table, referred_columns, .. } => {
+                            foreign_keys.push(ForeignKeyDef {
+                                name: None,
+                                columns: vec![col_name.clone()],
+                                ref_table: object_name_to_string(foreign_table),
+                                ref_columns: referred_columns.iter().map(|c| c.value.clone()).collect(),
+                            });
                         }
                         _ => {}
                     }
@@ -71,6 +105,8 @@ fn translate_statement(stmt: Statement) -> Result<ParsedStatement, SqlError> {
                 name,
                 columns,
                 indexes: vec![],
+                unique_constraints,
+                foreign_keys,
             };
             Ok(ParsedStatement::Command(SqlCommand::CreateTable {
                 schema,
